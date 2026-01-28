@@ -1,0 +1,27 @@
+node_modules/
+dist/
+release/
+out/
+build/
+.vite/
+.cache/
+.turbo/
+.parcel-cache/
+coverage/
+*.log
+*.tmp
+*.swp
+.env
+.env.*
+.eslintcache
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Certificates / secrets
+*.p12
+*.pfx
+*.pem
+*.key
+*.crt
