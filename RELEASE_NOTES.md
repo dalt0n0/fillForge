@@ -7,6 +7,7 @@
 - Allow PDF writes only to user-approved save paths
 - Add payload size limits for PDF and certificate data
 - Require a password when generating self-signed certificates
+- Upgrade Electron and electron-builder to address security advisories
 
 ## 0.1.0 - Initial release
 - Open existing PDFs or start from a blank document
