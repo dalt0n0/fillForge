@@ -6,6 +6,75 @@ const forge = require('node-forge');
 
 const isDev = !app.isPackaged;
 const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
+const devServerOrigin = (() => {
+  if (!isDev) return null;
+  try {
+    return new URL(devServerUrl).origin;
+  } catch (error) {
+    return null;
+  }
+})();
+const allowedWritePaths = new Set();
+const MAX_PDF_BYTES = 50 * 1024 * 1024;
+const MAX_CERT_BYTES = 5 * 1024 * 1024;
+
+const normalizePath = (filePath) => {
+  if (!filePath) return '';
+  const resolved = path.resolve(filePath);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+};
+
+const rememberWritePath = (filePath) => {
+  if (!filePath) return;
+  allowedWritePaths.add(normalizePath(filePath));
+};
+
+const isTrustedUrl = (url) => {
+  if (!url) return false;
+  if (url.startsWith('file://')) return true;
+  if (!isDev || !devServerOrigin) return false;
+  try {
+    return new URL(url).origin === devServerOrigin;
+  } catch (error) {
+    return false;
+  }
+};
+
+const isTrustedSender = (event) => {
+  const senderUrl = event?.senderFrame?.url || event?.sender?.getURL?.();
+  return isTrustedUrl(senderUrl);
+};
+
+const withTrustedSender = (handler) => async (event, ...args) => {
+  if (!isTrustedSender(event)) {
+    return { error: 'Untrusted request origin.' };
+  }
+  return handler(event, ...args);
+};
+
+const decodeBase64Payload = (data, maxBytes, label) => {
+  if (!data || typeof data !== 'string') {
+    throw new Error(`${label} data is missing.`);
+  }
+  const estimatedBytes = Math.floor((data.length * 3) / 4);
+  if (estimatedBytes > maxBytes) {
+    throw new Error(`${label} is too large.`);
+  }
+  const buffer = Buffer.from(data, 'base64');
+  if (buffer.length > maxBytes) {
+    throw new Error(`${label} is too large.`);
+  }
+  return buffer;
+};
+
+const isSafeExternalUrl = (url) => {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (error) {
+    return false;
+  }
+};
 
 const createWindow = () => {
   const appIcon = path.join(app.getAppPath(), 'favicon.ico');
@@ -19,7 +88,7 @@ const createWindow = () => {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
 
@@ -33,8 +102,18 @@ const createWindow = () => {
   }
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (isSafeExternalUrl(url)) {
+      shell.openExternal(url);
+    }
     return { action: 'deny' };
+  });
+
+  win.webContents.on('will-navigate', (event, url) => {
+    if (isTrustedUrl(url)) return;
+    event.preventDefault();
+    if (isSafeExternalUrl(url)) {
+      shell.openExternal(url);
+    }
   });
 };
 
@@ -51,7 +130,9 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-ipcMain.handle('dialog:openPdf', async () => {
+ipcMain.handle(
+  'dialog:openPdf',
+  withTrustedSender(async () => {
   const result = await dialog.showOpenDialog({
     title: 'Open PDF',
     filters: [{ name: 'PDF Documents', extensions: ['pdf'] }],
@@ -67,9 +148,12 @@ ipcMain.handle('dialog:openPdf', async () => {
     path: filePath,
     data: data.toString('base64')
   };
-});
+  })
+);
 
-ipcMain.handle('dialog:savePdf', async (_event, payload) => {
+ipcMain.handle(
+  'dialog:savePdf',
+  withTrustedSender(async (_event, payload) => {
   const { name, data } = payload || {};
   const result = await dialog.showSaveDialog({
     title: 'Export PDF',
@@ -79,13 +163,17 @@ ipcMain.handle('dialog:savePdf', async (_event, payload) => {
 
   if (result.canceled || !result.filePath) return null;
 
-  const buffer = Buffer.from(data, 'base64');
+  const buffer = decodeBase64Payload(data, MAX_PDF_BYTES, 'PDF');
   fs.writeFileSync(result.filePath, buffer);
+  rememberWritePath(result.filePath);
 
   return { path: result.filePath };
-});
+  })
+);
 
-ipcMain.handle('dialog:savePdfPath', async (_event, payload) => {
+ipcMain.handle(
+  'dialog:savePdfPath',
+  withTrustedSender(async (_event, payload) => {
   const { name } = payload || {};
   const result = await dialog.showSaveDialog({
     title: 'Export PDF',
@@ -94,18 +182,29 @@ ipcMain.handle('dialog:savePdfPath', async (_event, payload) => {
   });
 
   if (result.canceled || !result.filePath) return null;
+  rememberWritePath(result.filePath);
   return { path: result.filePath };
-});
+  })
+);
 
-ipcMain.handle('file:writePdf', async (_event, payload) => {
+ipcMain.handle(
+  'file:writePdf',
+  withTrustedSender(async (_event, payload) => {
   const { path: filePath, data } = payload || {};
   if (!filePath || !data) return null;
-  const buffer = Buffer.from(data, 'base64');
+  const normalizedPath = normalizePath(filePath);
+  if (!allowedWritePaths.has(normalizedPath)) {
+    return { error: 'Save path not approved.' };
+  }
+  const buffer = decodeBase64Payload(data, MAX_PDF_BYTES, 'PDF');
   fs.writeFileSync(filePath, buffer);
   return { path: filePath };
-});
+  })
+);
 
-ipcMain.handle('cert:createSelfSigned', async (_event, payload) => {
+ipcMain.handle(
+  'cert:createSelfSigned',
+  withTrustedSender(async (_event, payload) => {
   try {
     const {
       commonName,
@@ -118,6 +217,10 @@ ipcMain.handle('cert:createSelfSigned', async (_event, payload) => {
       password,
       validityYears
     } = payload || {};
+
+    if (!password) {
+      return { error: 'Certificate password is required.' };
+    }
 
     const result = await dialog.showSaveDialog({
       title: 'Save Certificate',
@@ -169,6 +272,7 @@ ipcMain.handle('cert:createSelfSigned', async (_event, payload) => {
     const p12Der = forge.asn1.toDer(p12Asn1).getBytes();
     const buffer = Buffer.from(p12Der, 'binary');
     fs.writeFileSync(result.filePath, buffer);
+    rememberWritePath(result.filePath);
 
     return {
       path: result.filePath,
@@ -178,9 +282,12 @@ ipcMain.handle('cert:createSelfSigned', async (_event, payload) => {
   } catch (error) {
     return { error: error.message || 'Failed to create certificate.' };
   }
-});
+  })
+);
 
-ipcMain.handle('dialog:openCertificate', async () => {
+ipcMain.handle(
+  'dialog:openCertificate',
+  withTrustedSender(async () => {
   const result = await dialog.showOpenDialog({
     title: 'Open Certificate',
     filters: [{ name: 'Certificates', extensions: ['p12', 'pfx'] }],
@@ -196,9 +303,12 @@ ipcMain.handle('dialog:openCertificate', async () => {
     path: filePath,
     data: data.toString('base64')
   };
-});
+  })
+);
 
-ipcMain.handle('pdf:signWithP12', async (_event, payload) => {
+ipcMain.handle(
+  'pdf:signWithP12',
+  withTrustedSender(async (_event, payload) => {
   try {
     const {
       pdfBase64,
@@ -212,12 +322,8 @@ ipcMain.handle('pdf:signWithP12', async (_event, payload) => {
       rect
     } = payload || {};
 
-    if (!pdfBase64 || !certBase64) {
-      return { error: 'Missing PDF or certificate data.' };
-    }
-
-    const pdfBuffer = Buffer.from(pdfBase64, 'base64');
-    const certBuffer = Buffer.from(certBase64, 'base64');
+    const pdfBuffer = decodeBase64Payload(pdfBase64, MAX_PDF_BYTES, 'PDF');
+    const certBuffer = decodeBase64Payload(certBase64, MAX_CERT_BYTES, 'Certificate');
 
     const placeholderModule = await import('@signpdf/placeholder-pdf-lib');
     const signerModule = await import('@signpdf/signer-p12');
@@ -268,4 +374,5 @@ ipcMain.handle('pdf:signWithP12', async (_event, payload) => {
   } catch (error) {
     return { error: error.message || 'Failed to sign PDF.' };
   }
-});
+  })
+);
