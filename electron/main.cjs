@@ -76,6 +76,27 @@ const isSafeExternalUrl = (url) => {
   }
 };
 
+const toFiniteNumber = (value, fallback = 0) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const normalizeWidgetRect = (rect = {}) => {
+  if (Array.isArray(rect) && rect.length >= 4) {
+    const left = toFiniteNumber(rect[0]);
+    const bottom = toFiniteNumber(rect[1]);
+    const right = toFiniteNumber(rect[2]);
+    const top = toFiniteNumber(rect[3]);
+    return [Math.min(left, right), Math.min(bottom, top), Math.max(left, right), Math.max(bottom, top)];
+  }
+
+  const x = toFiniteNumber(rect.x);
+  const y = toFiniteNumber(rect.y);
+  const width = Math.max(1, toFiniteNumber(rect.width, 0));
+  const height = Math.max(1, toFiniteNumber(rect.height, 0));
+  return [x, y, x + width, y + height];
+};
+
 const createWindow = () => {
   const appIcon = path.join(app.getAppPath(), 'favicon.ico');
   const win = new BrowserWindow({
@@ -341,17 +362,13 @@ ipcMain.handle(
 
     const pdfDoc = await PDFDocument.load(pdfBuffer);
     const pages = pdfDoc.getPages();
-    const safePageIndex = Math.min(Math.max(Number(pageIndex) || 0, 0), pages.length - 1);
-    const page = pages[safePageIndex];
+    if (pages.length === 0) {
+      return { error: 'Cannot sign a PDF with no pages.' };
+    }
 
-    const widgetRect = Array.isArray(rect)
-      ? rect
-      : [
-          rect?.x || 0,
-          rect?.y || 0,
-          (rect?.x || 0) + (rect?.width || 0),
-          (rect?.y || 0) + (rect?.height || 0)
-        ];
+    const safePageIndex = Math.min(Math.max(toFiniteNumber(pageIndex), 0), pages.length - 1);
+    const page = pages[safePageIndex];
+    const widgetRect = normalizeWidgetRect(rect);
 
     pdflibAddPlaceholder({
       pdfDoc,
