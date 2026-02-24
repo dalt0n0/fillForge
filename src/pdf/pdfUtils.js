@@ -255,12 +255,26 @@ export const setFormFieldValue = async (bytes, fieldName, value) => {
       field.uncheck();
     }
   } else if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
-    if (value) {
-      field.select(String(value));
+    if (!value) {
+      try {
+        field.clear();
+      } catch (error) {
+        // Keep existing value for PDFs with read-only or unsupported fields.
+      }
+    } else {
+      const optionValue = String(value);
+      const options = field.getOptions();
+      if (options.includes(optionValue)) {
+        field.select(optionValue);
+      }
     }
   } else if (field instanceof PDFRadioGroup) {
     if (value) {
-      field.select(String(value));
+      const radioValue = String(value);
+      const options = field.getOptions();
+      if (options.includes(radioValue)) {
+        field.select(radioValue);
+      }
     }
   }
 
